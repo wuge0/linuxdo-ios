@@ -1,0 +1,145 @@
+name: Build linux.do Client
+
+# 自建构建流程：绕过上游 CI 的 owner 限制
+# 上游 .github/workflows/build.yml 的 prepare job 带
+#   if: github.repository_owner == 'minh-ton'
+# 导致 fork 后 CI 被跳过。本文件去掉该限制并内联全部逻辑。
+#
+# 用公开仓库跑 → macOS runner 完全免费（不限分钟数）
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_trollstore:
+        description: '构建 TrollStore TIPA（iOS 14-16.6.1）'
+        type: boolean
+        default: true
+      build_normal:
+        description: '构建普通 IPA（iOS 17.4+）'
+        type: boolean
+        default: false
+      nightly:
+        description: '标记为 Nightly 版本'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (macOS 26)
+    runs-on: macos-26
+    timeout-minutes: 180          # Gecko 编译慢，给足时间
+
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Set up Xcode 26
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.6'
+
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          python3 --version
+          sw_vers
+
+      - name: Install build dependencies
+        run: |
+          brew install python@3.12 lld cbindgen llvm ldid
+          echo "$(brew --prefix python@3.12)/libexec/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Initialize submodules
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive support/idevice
+          git submodule update --init --depth 1 engine/firefox
+
+      - name: Update Gecko source
+        run: ./tools/development/update-gecko.sh
+
+      - name: Apply Gecko patches
+        run: ./tools/development/apply-patches.sh
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Hash Rust toolchain for cache key
+        id: rust_toolchain
+        run: echo "hash=$(rustc -Vv | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Gecko dependency cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.mozbuild
+          key: gecko-deps-${{ steps.rust_toolchain.outputs.hash }}-${{ hashFiles('engine/release.txt') }}
+          restore-keys: |
+            gecko-deps-${{ steps.rust_toolchain.outputs.hash }}-
+
+      - name: Restore idevice build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            support/idevice/target
+            browser/Reynard/JIT/RPPairing/libidevice_ffi.a
+          key: idevice-${{ steps.rust_toolchain.outputs.hash }}-${{ hashFiles('support/idevice/Cargo.lock', 'support/idevice/Cargo.toml') }}
+          restore-keys: |
+            idevice-${{ steps.rust_toolchain.outputs.hash }}-
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Build Gecko engine
+        env:
+          CC: clang
+          CXX: clang++
+          LD: ld64.lld
+        run: ./tools/development/build-gecko.sh --use-sccache --auto-clobber
+
+      - name: Build idevice support library
+        run: ./tools/development/build-idevice.sh
+
+      - name: Build app (unsigned)
+        run: ./tools/release/build-app.sh --no-signing ${{ inputs.nightly && '--nightly' || '' }}
+
+      - name: Create TrollStore TIPA
+        if: ${{ inputs.build_trollstore }}
+        run: ./tools/release/create-ipa.sh --trollstore
+
+      - name: Create normal IPA
+        if: ${{ inputs.build_normal }}
+        run: ./tools/release/create-ipa.sh
+
+      - name: Upload TrollStore TIPA
+        if: ${{ inputs.build_trollstore }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Reynard-TrollStore-tipa
+          path: dist/*.tipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload normal IPA
+        if: ${{ inputs.build_normal }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Reynard-ipa
+          path: dist/Reynard.ipa
+          if-no-files-found: error
+          retention-days: 30
