@@ -143,3 +143,5 @@ jobs:
           path: dist/Reynard.ipa
           if-no-files-found: error
           retention-days: 30
+
+# reindex: 触发 Actions 重新扫描
