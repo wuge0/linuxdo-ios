@@ -24,7 +24,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write        # 需要写权限才能创建 Release
 
 jobs:
   build:
@@ -143,5 +143,27 @@ jobs:
           path: dist/Reynard.ipa
           if-no-files-found: error
           retention-days: 30
+
+      # 发布到 Release，供 TrollStore 直接点链接安装（无体积限制、长期保留）
+      - name: Publish Release
+        if: ${{ inputs.build_trollstore || inputs.build_normal }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="build-$(date -u +%Y%m%d-%H%M%S)"
+          FILES=$(ls dist/*.tipa dist/Reynard.ipa 2>/dev/null || true)
+          if [ -z "$FILES" ]; then
+            echo "没有可发布的构建产物"; exit 1
+          fi
+          echo "=== 待发布文件 ==="
+          ls -lh $FILES
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "linux.do 客户端 $TAG" \
+            --notes "自动构建产物（$TAG）。TrollStore 安装：在手机上点开本页下方的 .tipa 资源链接，下载完成后 TrollStore 会自动弹窗识别并安装。" \
+            $FILES
+          echo "=== Release 创建完成: $TAG ==="
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url -q .url
 
 # reindex: 触发 Actions 重新扫描
